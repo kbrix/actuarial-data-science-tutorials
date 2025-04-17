@@ -1,0 +1,437 @@
+---
+title: "001 - French Motor Third-Party Liability Claims"
+theme: none
+execute: 
+  cache: false
+editor_options: 
+  chunk_output_type: console
+---
+
+## Setup
+
+Use `renv` to manage packages.
+
+```{r renv}
+renv::status()
+# renv::restore()
+# renv::snapshot()
+# renv::clean()
+# renv::install( c("ggplot2", "maps", "devtools", "glue", "magrittr", "dplyr", "gridExtra", "corrplot", "rpart", "rpart.plot") )
+```
+
+Only load absolutely essential packages.
+
+```{r package}
+#| echo: true
+#| results: hide
+#| message: false
+
+library(magrittr)
+library(ggplot2)
+```
+
+Loading data-set.
+
+```{r data}
+#| echo: true
+#| results: hide
+#| message: false
+
+if ("CASdatasets" %in% rownames(installed.packages()) == F) {
+  # https://github.com/dutangc/CASdatasets
+  devtools::install_github("dutangc/CASdatasets") 
+}
+```
+
+## Inspecting data
+
+```{r data-transform}
+library(CASdatasets)
+# ?CASdatasets::freMTPL2freq
+data(freMTPL2freq);
+data <- freMTPL2freq %T>% 
+  { names(.) %<>% tolower }
+```
+
+Loading in map data for France.
+
+```{r map}
+map <- ggplot2::map_data("france") %T>%
+  { names(.) <- c("long", "lat", "group", "order", "department", "subregion") }
+```
+
+Loading in map data from .csv file taken from `https://www.reallyfrench.com/departements.php`
+
+```{r csv}
+region <- "data/france-department-region-map.csv" %>%
+  utils::read.csv2() %T>%
+  { names(.) <- c("department", "region") }
+```
+
+Augmenting map data with regions per department.
+
+```{r final-map-data}
+map <- dplyr::left_join(map, region, by = "department")
+```
+
+Group by region and compute means and medians for numeric variabels.
+
+```{r numerical-variables}
+grouped_data <- data %>%
+  dplyr::group_by(region) %>%
+  dplyr::summarise(
+    mean_claimnb = mean( claimnb, na.rm = T ),
+		median_claimnb = median( claimnb, na.rm = T),
+		mean_exposure = mean( exposure, na.rm = T ),
+		median_exposure = median( exposure, na.rm = T),
+		mean_vehpower = mean( vehpower, na.rm = T ),
+		median_vehpower = median( vehpower, na.rm = T),
+		mean_vehage = mean( vehage, na.rm = T ), 
+		median_vehage = median( vehage, na.rm = T),
+		mean_drivage = mean( drivage, na.rm = T ), 
+		median_drivage = median( drivage, na.rm = T),
+		mean_bonusmalus = mean( bonusmalus, na.rm = T ),
+		median_bonusmalus = median( bonusmalus, na.rm = T),
+		mean_density = mean( density, na.rm = T ),
+		median_density = median( density, na.rm = T)
+  )
+
+map <- dplyr::left_join(map, grouped_data, by = "region")
+```
+
+Plot map and grouped data.
+
+```{r plots}
+#| fig-width: 14
+#| fig-height: 36
+
+vars <- c(
+	"mean_claimnb",
+	"median_claimnb",
+	"mean_exposure",
+	"median_exposure",
+	"mean_vehpower",
+	"median_vehpower",
+	"mean_vehage",
+	"median_vehage",
+	"mean_drivage",
+	"median_drivage",
+	"mean_bonusmalus",
+	"median_bonusmalus",
+	"mean_density",
+	"median_density"
+)
+
+f <- function(var) {
+  ggplot(map, aes(long, lat, group = group)) +
+    geom_polygon(aes(fill = .data[[var]] )) +
+    geom_path() +
+    scale_fill_gradient(low = "white", high = "red") +
+  xlab("Longitude") + ylab("Latitude")
+}
+
+plots <- lapply(vars, f)
+gridExtra::grid.arrange(grobs = plots, ncol = 2)
+```
+
+Correlation plot.
+
+```{r correlation-plot}
+#| fig-width: 10
+#| fig-height: 10
+
+correlation <- data %>%
+  dplyr::select(claimnb, exposure, vehpower, vehage, drivage, bonusmalus, density) %>%
+  stats::cor()
+
+corrplot::corrplot.mixed(correlation, upper = 'ellipse', order = 'FPC', tl.col = 'black', cl.ratio = 0.2, tl.srt = 45)
+```
+
+Clean data.
+
+```{r clea-data}
+data[data$exposure > 1, ]$exposure <- 1 # exposure capped at one year
+data[data$claimnb > 4, ]$claimnb <- 4 # claim amount capped at 4 claims
+data$regionLong <- data$region
+levels(data$region) <- 1:22
+```
+
+Processing data for GLM.
+
+```{r process-data}
+data$areaGLM <- as.integer(data$area); head(data$areaGLM)
+data$vehpowerGLM <- data$vehpower %>% pmin(9) %>% as.factor; head(data$vehpowerGLM)
+vehageGLM <- cbind(age = 0:110, category = c(1, rep(2, 10), rep(3, 100))) # i.e. {0}, [1, 10], and [10, 110]
+data$vehageGLM <- vehageGLM[data$vehage + 1, 2] %>% as.factor() %>%  relevel(ref = "2"); head(data$vehageGLM)
+drivageGLM <- cbind(
+  18:100, c(
+    rep(1, 21-18),   #  3, [18, 21)
+    rep(2, 26-21),   #  5, [21, 26)
+    rep(3, 31-26),   #  5, [26, 31)
+    rep(4, 41-31),   # 10, [31, 41)
+    rep(5, 51-41),   # 10, [41, 51)
+    rep(6, 71-51),   # 20, [51, 71)
+    rep(7, 1+100-71) # 30, [71, 100]
+    )
+  )
+data$drivageGLM <- drivageGLM[data$drivage - 17, 2] %>% as.factor() %>% relevel(ref = "5"); head(data$drivageGLM)
+data$bonusmalusGLM <- data$bonusmalus %>% pmin(150) %>% as.integer(); head(data$bonusmalus)
+data$densityGLM <- data$density %>% log() %>% as.numeric(); head(data$densityGLM)
+data[, "region"] <- data[, "region"] %>% relevel(ref = "7") # 7 is 'Centre'
+```
+
+Dividing data into learning data (which will be used to compute in-of-sample scores) and learning data (which will be used to compute out-of-sample scores).
+
+```{r split-data}
+RNGversion('3.5.0')
+set.seed(100)
+N <- nrow(data)
+index <- base::sample(1:N, size = round(0.9 * N), replace = T)
+learn <- data[index, ]
+test <- data[-index, ]
+```
+
+# GLM
+
+Fit the GLM
+
+```{r glm}
+glm1 <- glm(
+  formula = claimnb ~ vehpowerGLM + vehageGLM + drivageGLM + bonusmalusGLM +
+    vehbrand + vehgas + densityGLM + region + areaGLM, 
+  family = poisson(), data = learn , offset = log(exposure))
+summary(glm1)
+```
+
+# ANOVA
+
+We are tempted to remove the `areaGLM` covariate from our model, but alas, it provides a smaller out-of-sample error/score.
+
+```{r anova}
+anova(glm1)
+```
+
+# Loss values for our GLM models
+
+Define the Poisson deviance loss function.
+
+```{r poisson-deviance-loss}
+# 'y' are the claim values and 'm' is the 'lambda' * 'v' (i.e. the fitted values)
+poisson_deviance_loss <- function(y, m) {
+  if(y == 0){
+    2 * (m - y - y)
+  } else {
+    2 * (m - y - y * log(m / y))
+  }
+}
+poisson_deviance_loss <- Vectorize(poisson_deviance_loss)
+```
+
+Compute loss values for the full GLM model.
+
+```{r loss-glm}
+learn$fitted <- glm1$fitted
+test$fitted <- predict(glm1, newdata = test, type = "response")
+
+# In-sample loss for GLM1 (the full model)
+glm1_in_loss <- poisson_deviance_loss(learn$claimnb, learn$fitted) %>% mean(); glm1_in_loss
+
+# Out-of-sample loss for GLM1 (the full model) 
+glm1_out_loss <- poisson_deviance_loss(test$claimnb, test$fitted) %>% mean(); glm1_out_loss # <-- the lowest value!
+```
+
+How about a model without the `areaGLM` covariate?
+
+```{r loss-glm-other-1}
+# No 'areaGLM' covriate
+glm2 <- glm(
+  formula = claimnb ~ vehpowerGLM + vehageGLM + drivageGLM + bonusmalusGLM +
+    vehbrand + vehgas + densityGLM + region, 
+  family = poisson(), data = learn , offset = log(exposure))
+
+# In-sample loss for GLM2 (model without 'areaGLM')
+glm2_in_loss<- poisson_deviance_loss(learn$claimnb, fitted(glm2)) %>% mean()
+
+# Out-of-sample loss for GLM2 (model without 'areaGLM')
+glm2_out_loss <- poisson_deviance_loss(test$claimnb, predict(glm2, newdata = test, type = "response")) %>% mean()
+```
+
+How about a model without both the `areaGLM` and `vehbrand` covariates?
+
+```{r loss-glm-other-2}
+# No 'areaGLM' covriate
+glm3 <- glm(
+  formula = claimnb ~ vehpowerGLM + vehageGLM + drivageGLM + bonusmalusGLM +
+    vehgas + densityGLM + region, 
+  family = poisson(), data = learn , offset = log(exposure))
+
+# In-sample loss for GLM3 (model without 'areaGLM' and 'vehbrand')
+glm3_in_loss <- poisson_deviance_loss(learn$claimnb, fitted(glm3)) %>% mean(); glm3_in_loss
+
+# Out-of-sample loss for GLM3 (model without 'areaGLM' and 'vehbrand')
+glm3_out_loss <- poisson_deviance_loss(test$claimnb, predict(glm3, newdata = test, type = "response")) %>% mean(); glm3_out_loss
+```
+
+# Regression trees
+
+```{r tree1}
+tree1 <- rpart::rpart(
+  cbind(exposure, claimnb) ~ area + vehpower + vehage + drivage + 
+    bonusmalus + vehbrand + vehgas + density + region,
+  data = learn, method = "poisson",
+  control = rpart::rpart.control(xval = 1, minbucket =  10000, cp = 0.0005)
+)
+tree1
+```
+
+```{r plot-tree1}
+#| fig-width: 20
+#| fig-height: 10
+rpart.plot::rpart.plot(tree1)
+``` 
+
+Compute loss values for the regression tree model
+
+```{r tree1-loss}
+# In-sample loss
+tree1_in_loss <- poisson_deviance_loss(
+  learn$claimnb,
+  predict(tree1) * learn$exposure) %>% mean(); tree1_in_loss
+# Out-of-sample loss
+tree1_out_loss <- poisson_deviance_loss(
+  test$claimnb,
+  predict(tree1, newdata = test) * test$exposure) %>% mean(); tree1_out_loss
+```
+
+Try another tree with more leaves and where the minimal leaf size is 1000 instead of 10'000.
+
+```{r tree2}
+tree2 <- rpart::rpart(
+  cbind(exposure, claimnb) ~ area + vehpower + vehage + drivage + 
+    bonusmalus + vehbrand + vehgas + density + region,
+  data = learn, method = "poisson",
+  control = rpart::rpart.control(xval = 1, minbucket =  1000, cp = 0.0001)
+)
+```
+
+Compute loss values for the new regression tree model.
+
+```{r tree2-loss}
+# In-sample loss
+tree2_in_loss <- poisson_deviance_loss(
+  learn$claimnb,
+  predict(tree2) * learn$exposure) %>% mean(); tree2_in_loss
+# Out-of-sample loss
+tree2_out_loss <- poisson_deviance_loss(
+  test$claimnb,
+  predict(tree2, newdata = test) * test$exposure) %>% mean(); tree2_out_loss
+```
+
+# Boosting machines
+
+Try creating a boosting machine for our regression tree with a shrinkage parameter.
+
+```{r boosting}
+nu <- 0.75
+J <- 3
+M <- 80
+
+learn$boost_fitted <- learn$exposure
+test$boost_fitted <- test$exposure
+
+boost <- list()
+
+for (m in 1:M) {
+  tree <- rpart::rpart(
+    cbind(boost_fitted, claimnb) ~ 
+      area + vehpower + vehage + drivage + 
+      bonusmalus + vehbrand + vehgas + density + region,
+    data = learn, method = "poisson",
+    control = rpart::rpart.control(
+      maxdepth = J, maxsurrogate = 0,
+      xval = 1, minbucket =  10000, cp = 0.00001)
+    )
+  
+  learn$boost_fitted <- learn$boost_fitted * predict(tree)^nu
+  test$boost_fitted <- test$boost_fitted * predict(tree, newdata = test)^nu
+  
+  # In-sample loss
+  in_loss <- poisson_deviance_loss(
+    learn$claimnb,
+    predict(tree) * learn$boost_fitted) %>% mean()
+  
+  # Out-of-sample loss
+  out_loss <- poisson_deviance_loss(
+    test$claimnb,
+    predict(tree, newdata = test) * test$boost_fitted) %>% mean()
+  
+  boost[[m]] <- list(
+    nu = nu, j = J, m = m, in_loss = in_loss, out_loss = out_loss, tree = tree
+  )
+}
+```
+
+Extract the model with the lowest out-of-sample loss.
+
+```{r boosting-results}
+f <- function(x, y) {
+  if(x$out_loss <= y$out_loss) {
+    x
+  } else {
+    y
+  }
+}
+boost_tree <- Reduce(f, boost)
+
+# In-sample loss
+boost_tree$in_loss;
+
+# Out-of-sample loss
+boost_tree$in_loss;
+```
+
+Plot out-of-sample losses per iteration, over-fitting occurs after iteration 46.
+
+```{r boosting-plot}
+#| fig-height: 8
+#| fig-width: 8
+
+boost_losses <- lapply(boost, function(x) c(x$m, x$out_loss)) %>%
+  { do.call(rbind.data.frame, .) } %T>%
+  { names(.) <- c("Iteration", "Out-of-sample loss")}
+
+ggplot(
+  data = boost_losses[-(1:10), ],
+  aes(x = Iteration, y = `Out-of-sample loss`)) +
+  geom_point() + geom_vline(xintercept = boost_tree$m, color = "red", linetype = "dashed") + 
+  geom_line() + 
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  ggtitle("Comparison of losses for each iteration in the boosting machine") +
+  theme_bw()
+```
+
+We will skip the GLM boosting machine, where iteration one is the GLM.
+
+# Neural networks
+
+Naah, skip this!
+
+# Comparison
+Comparison of models and loss values.
+
+```{r loss-comparison}
+losses <- data.frame(
+  rbind( 
+    c( glm1_in_loss, glm1_out_loss ),
+    c( glm2_in_loss, glm2_out_loss ),
+    c( glm3_in_loss, glm3_out_loss ),
+    c( tree1_in_loss, tree1_out_loss ),
+    c( tree2_in_loss, tree2_out_loss ),
+    c( boost_tree$in_loss, boost_tree$in_loss )
+  )
+)
+rownames(losses) <- c("glm1", "glm2", "glm3", "tree1", "tree2", "boost")
+names(losses) <- c("in-sample", "out-of-sample")
+losses
+```

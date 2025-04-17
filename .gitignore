@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+/.quarto/
+/001/001_cache/*
+
+001/.idea/*
+.idea/*
