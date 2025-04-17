@@ -1,0 +1,384 @@
+---
+title: "014 - SHAP"
+theme: none
+execute: 
+  cache: false
+editor_options: 
+  chunk_output_type: console
+---
+
+This follows the tutorial from ["SHAP for Actuaries: Explain any Model"](https://github.com/actuarial-data-science/Tutorials/tree/master/14%20-%20SHAP).
+
+## Setup
+
+Use `renv` to manage packages.
+```{r renv}
+renv::status()
+# renv::restore()
+# renv::snapshot()
+# renv::clean()
+# renv::install( c("arrow", "ggplot2", "caret", "keras3", "gridExtra", "lightgbm", "shapviz", "kernelshap") )
+```
+
+Only load absolutely essential packages.
+
+```{r package}
+#| echo: true
+#| results: hide
+#| message: false
+
+library(magrittr)
+library(ggplot2)
+```
+
+Loading data-set.
+
+```{r data}
+#| echo: true
+#| results: hide
+#| message: false
+
+df <- arrow::read_parquet("data/df.parquet")
+```
+
+## Inspecting data
+
+```{r inspect-data}
+summary(df)
+head(df)
+```
+
+## Split
+
+Split the data into a training set and a validation set.
+
+```{r split}
+set.seed(3105)
+ix <- base::sample(nrow(df), 0.9 * nrow(df))
+
+# Response
+y <- "claim_nb"
+
+# Covariates
+x <- c("year", "town", "driver_age", "car_weight", "car_power", "car_age")
+
+train <- df[ix, ]
+test <- df[-ix, ]
+
+y_train <- train[[y]]
+x_train <- data.matrix(train[x])
+```
+
+## GLM
+
+Fit the GLM.
+
+```{r glm}
+model_specification <- stats::reformulate(x, y); model_specification
+fit_glm <- model_specification %>% stats::glm(data = train, family = poisson(link = "log")); fit_glm
+```
+
+## NN
+
+First install Keras API with Tensorflow as its back-end. The instructions are from [posit (click here)](https://keras3.posit.co/articles/getting_started.html)
+```{r keras-tensorflow}
+# Installs everything with the following (uncomment and execute)...
+# keras3::install_keras(backend = "tensorflow")
+```
+
+Fit the neural network. First define the neural network architecture.
+```{r nn}
+# Processor for data
+scaler <- caret::preProcess(x_train, method = "range", rangeBounds = c(-1, 1)); scaler
+
+# Callback functions for neural network
+cb <- list(
+  keras3::callback_early_stopping(patience = 20),
+  keras3::callback_reduce_lr_on_plateau(patience = 5)
+)
+
+# Neural network architecture
+make_nn <- function() {
+  keras3::clear_session()
+  tensorflow::set_random_seed(4349)
+  
+  input <- keras::layer_input(length(x))
+  
+  output <- input %>%
+    keras3::layer_dense(units = 40, activation = "tanh") %>%
+    keras3::layer_dense(units = 20, activation = "tanh") %>% 
+    keras3::layer_dense(units = 10, activation = "tanh") %>%
+    keras3::layer_dense(units = 1, activation = "exponential")
+
+  keras3::keras_model(input, output)
+}
+
+# Create the model
+fit_nn <- make_nn() %>% 
+  keras::compile(
+    optimizer = keras3::optimizer_adam(learning_rate = 1e-4),
+    loss = keras3::loss_poisson);
+fit_nn
+```
+
+Fit the model.
+
+```{r nn-fit}
+system.time(
+  history <- fit_nn %>%
+    keras3::fit(
+      x = stats::predict(scaler, x_train), 
+      y = y_train,
+      epochs = 200, 
+      batch_size = 1e4,
+      validation_split = 0.1,
+      callbacks = cb,
+      verbose = 0
+  )
+)
+```
+
+Inspect the loss and learning rate. Around epoch 110 is where we should consider stopping.
+
+```{r nn-plot}
+#| fig-width: 10
+#| fig-height: 5
+loss_validation <- history$metrics$loss
+loss_train <- history$metrics$val_loss
+learning_rate <- history$metrics$learning_rate
+epoch <- base::seq_along(loss_train)
+ymin <- base::min(loss_train, loss_validation)
+
+p1 <- ggplot() + 
+  geom_point(aes(x = epoch, y = loss_train, col = "Training")) +
+  geom_point(aes(x = epoch, y = loss_validation, col = "Validation")) +
+  coord_cartesian(ylim = c(ymin, 0.3012), xlim = c(100, 145)) +
+  ylab("Loss") + xlab("Epoch") +
+  theme_bw() + theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.8,0.8),
+    legend.title = element_blank())
+
+p2 <- ggplot() + geom_point(aes(x = epoch, y = learning_rate), col = "purple") + 
+  coord_cartesian(xlim = c(100, 145)) +
+  ylab("Learning rate") + xlab("Epoch") +
+  theme_bw()
+
+gridExtra::grid.arrange(grobs = list(p1, p2), ncol = 2)
+```
+
+## Boosted tree model
+
+To fit a boosted trees model, we use LightGBM. The parameters have been tuned outside this script by combining early-stopping with random parameter search cross-validation.
+
+```{r tree}
+dtrain <- lightgbm::lgb.Dataset(
+  x_train,
+  label = y_train,
+  params = list(feature_pre_filter = FALSE)
+)
+
+params <- list(
+  learning_rate = 0.05, 
+  objective = "poisson", 
+  metric = "poisson", 
+  num_leaves = 7, 
+  min_data_in_leaf = 50, 
+  min_sum_hessian_in_leaf = 0.001, 
+  colsample_bynode = 0.8, 
+  bagging_fraction = 0.8, 
+  lambda_l1 = 3, 
+  lambda_l2 = 5, 
+  num_threads = 7
+)
+
+fit_lgb <- lightgbm::lgb.train(params = params, data = dtrain, nrounds = 300)
+```
+
+## The true model
+
+The data is simulated, so the underlying true is known.
+
+```{r true-model}
+age_effect <- function(age) {
+  x <- (age - 66) / 60
+  0.05 + x^8 + 0.4*x^3 + 0.3*x^2 + 0.06*x
+}
+
+true_model <- function(df) {
+  log_lambda <- with(
+    df, 
+    0 +
+      0.15 * town + 
+      + log(age_effect(driver_age)) +
+      (0.3 + 0.15 * town) * car_power / 100 +  # interaction 1
+    #  0.1 * car_power / (car_weight / 100)^2 + # interaction 2
+      -0.02 * car_age
+  )
+  exp(log_lambda)
+}
+
+# Check
+true_model(head(df))
+```
+
+## SHAP analysis: tree model
+
+The first steps in the SHAP analysis is to select a dataset of 1000 rows to be explained. Furthermore, for model-agnostic Kernel SHAP, we additionally sample a smaller dataset, serving as background data for integrating out marginal means.
+
+```{r shap-prep}
+x_explain <- train[sample(nrow(train), 1000), x]
+bg <- train[sample(nrow(train), 200), ]
+```
+
+Waterfall plot for a single element of the tree model.
+
+```{r shap-tree}
+system.time( # is very fast for tree models
+  shap_lgb <- shapviz::shapviz(
+    fit_lgb, X_pred = data.matrix(x_explain))
+)
+shap_lgb
+```
+
+Plot the waterfall plot for the tree model for a single observation.
+
+```{r shap-tree-plot}
+# SHAP waterfall plot for the second row
+shapviz::sv_waterfall(shap_lgb, row_id = 2)
+```
+
+Plot the importance plot for the tree model represented by a bar plot and a bee-swarm plot.
+
+```{r shap-tree-importance-plot}
+#| fig-width: 14
+#| fig-height: 5
+p1 <- shapviz::sv_importance(shap_lgb, show_numbers = TRUE, kind = "bar") + theme_bw()
+p2 <- shapviz::sv_importance(shap_lgb, show_numbers = TRUE, kind = "beeswarm") + theme_bw()
+gridExtra::grid.arrange(grobs = list(p1, p2), ncol = 2)
+```
+
+Plot the dependence plot for the tree model for each covariate and its (potentially) strongest interaction (see e.g. car-power and town where some clustering/grouping is evident).
+
+```{r shap-tree-dependence-plot}
+#| fig-width: 14
+#| fig-height: 7
+shapviz::sv_dependence(shap_lgb, x, alpha = 0.5) & theme_bw()
+```
+
+## SHAP analysis: non-tree models
+
+Here the model-agnostic 'Kernel SHAP' method is used. This is much slower than the tree model.
+
+We will focus the on the dependence plots.
+
+### GLM
+
+```{r shap-glm-dependence-plot}
+#| fig-width: 14
+#| fig-height: 7
+
+system.time(
+  shap_glm <- shapviz::shapviz(
+    kernelshap::kernelshap(fit_glm, X = x_explain, bg_X = bg, verbose = FALSE))
+)
+
+shapviz::sv_dependence(shap_glm, x, alpha = 0.5) & theme_bw()
+```
+
+### Neural Network
+
+```{r shap-nn-dependence-plot}
+#| fig-width: 14
+#| fig-height: 7
+
+# Function that maps data.frame to neural net input and calculates (log) predictions
+pred_nn_ln <- function(model, df) {
+  X <- data.matrix(df[x])
+  X_scaled <- stats::predict(scaler, X)
+  log(stats::predict(model, X_scaled, batch_size = 1e4, verbose = 0))
+}
+
+system.time(
+  shap_nn <- shapviz::shapviz(
+    kernelshap::kernelshap(fit_nn, X = x_explain, bg_X = bg, pred_fun = pred_nn_ln, verbose = FALSE))
+)
+
+shapviz::sv_dependence(shap_nn, x, alpha = 0.5) & theme_bw()
+```
+
+## True Model
+
+```{r shap-true-model-dependence-plot}
+#| fig-width: 14
+#| fig-height: 7
+
+system.time(
+  shap_truth <- shapviz::shapviz(
+    kernelshap::kernelshap(
+      "truth", 
+      X = x_explain, 
+      bg_X = bg, 
+      pred_fun = function(m, X) log(true_model(X)), 
+      verbose = FALSE
+    )
+  )
+)
+
+shapviz::sv_dependence(shap_nn, x, alpha = 0.5) & theme_bw()
+```
+
+## An imporved GLM
+
+Based on the SHAP analysis, we notice that 1) `year` and `car_weight` have very little effect on the model, 2) there is likely an interactive between `town` and `car_power`, and 3) `driver_age` has a non-linear effect.
+
+```{r glm2}
+fit_glm2 <- stats::glm(
+  claim_nb ~ town * car_power + splines::ns(driver_age, 5) + car_weight + car_age,
+  data = train,
+  family = poisson(link = "log")
+)
+fit_glm2
+```
+
+Comparing out-of-sample loss values. The imporved GLM has the smallest out-of-sample loss value.
+
+```{r loss}
+# Poisson deviance loss:
+#   'y' are the claim values and 'm' is the 'lambda' * 'v' (i.e. the fitted values).
+poisson_deviance_loss <- function(y, m) {
+  if(y == 0){
+    2 * (m - y - y)
+  } else {
+    2 * (m - y - y * log(m / y))
+  }
+}
+
+# Vectorize the function
+poisson_deviance_loss <- Vectorize(poisson_deviance_loss)
+
+# Out-of-sample loss values for all models below...
+# GLM 2
+out_loss_glm2 <- poisson_deviance_loss( test$claim_nb, stats::predict.glm(fit_glm2, newdata = test, type = "response") ) %>% mean()
+
+# GLM (original)
+out_loss_glm <- poisson_deviance_loss(
+  test$claim_nb, stats::predict.glm(fit_glm, newdata = test, type = "response") ) %>% mean()
+
+# Neural network
+out_loss_nn <- poisson_deviance_loss(
+  test$claim_nb, pred_nn_ln(fit_nn, test) %>% exp() %>% as.vector() ) %>% mean()
+
+# Boosted trees model
+out_loss_lgb <- poisson_deviance_loss( 
+  test$claim_nb, stats::predict(fit_lgb, newdata = data.matrix(test[x]), type = "response") ) %>% mean()
+
+# The true model
+out_loss_true <- poisson_deviance_loss( 
+  test$claim_nb, true_model(test) ) %>% mean()
+
+# Compare loss values
+loss <- c( "glm" = out_loss_glm, "nn" = out_loss_nn, "lgb" = out_loss_lgb, "glm2" = out_loss_glm2, "true" = out_loss_true )
+
+data.frame(loss)
+```
