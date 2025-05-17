@@ -1,0 +1,355 @@
+---
+title: "005 - Unsupervised Learning: What is a Sports Car?"
+theme: none
+execute: 
+  cache: false
+editor_options: 
+  chunk_output_type: console
+---
+
+This follows the tutorial from ["Unsupervised Learning What is a Sports Carl"](https://github.com/actuarial-data-science/Tutorials/tree/master/5%20-%20Unsupervised%20Learning%20What%20is%20a%20Sports%20Car).
+
+## Setup
+
+Use `renv` to manage packages.
+```{r renv}
+renv::status()
+# renv::restore()
+# renv::snapshot()
+# renv::clean()
+# renv::remove( c("reticulate") )
+# renv::install( c("reticulate", "keras3", "data.table", "GGally", "gridExtra") )
+```
+
+Set seed.
+
+```{r seed}
+seed <- 100
+Sys.setenv(PYTHONHASHSEED = seed)
+set.seed(seed)
+#reticulate::py_set_seed(seed)
+#tensorflow::tf$random$set_seed(seed)
+```
+
+Frobenius loss function.
+
+```{r frobenius}
+frobenius_loss <- function(x, y) {
+  (x - y)^2 %>%
+    as.matrix() %>%
+    sum() %>%
+    { . / nrow(x) } %>%
+    sqrt()
+}
+```
+
+Only load absolutely essential packages.
+
+```{r package}
+#| echo: true
+#| results: hide
+#| message: false
+
+library(magrittr)
+library(ggplot2)
+library(data.table)
+```
+
+## Looking at data
+
+Loading data-set. Prefer using `data.table`, [see here for a comparison on the syntax.](https://atrebas.github.io/post/2019-03-03-datatable-dplyr/)
+
+```{r data}
+#| echo: true
+#| results: hide
+#| message: false
+
+df <- data.table::fread("data/SportsCars.csv")
+
+str(df)
+```
+
+Adding additional columns and a visialization.
+
+```{r add-cols}
+#| message: false
+#| fig-width: 14
+#| fig-height: 14
+
+df[, ':='(
+  weight_log = log(weight),
+  max_power_log = log(max_power),
+  cubic_capacity_log = log(cubic_capacity),
+  max_torque_log = log(max_torque),
+  max_engine_speed_log = log(max_engine_speed),
+  seconds_to_100_log = log(seconds_to_100),
+  top_speed_log = log(top_speed)
+  ) ]
+
+# Names of column variables for selection
+vars <- c("weight_log", "max_power_log", "cubic_capacity_log", "max_torque_log", "max_engine_speed_log", "seconds_to_100_log", "top_speed_log")
+
+# Display names of column variables for plotting
+names <- c("weight", "power", "volume", "torque", "rpm", "acceleration", "speed")
+
+df[, ..vars] %>% na.omit() %>% 
+  GGally::ggpairs(
+    title = "Continuous covariates in logarithmic scale",
+    columnLabels = names) + 
+  theme_bw()
+```
+
+Adding the expert opinion on defining a sports car.
+
+```{r sportscar}
+#| fig-width: 14
+#| fig-height: 14
+
+sports_type <- base::cut(
+  df$tau,
+  breaks = c(0, 17, 21, 100), 
+  labels = c("[0, 17)", "[17, 21)", "[21, 38)"))
+
+df[, sports_type := sports_type ]
+
+vars <- c(vars, "sports_type")
+
+df[, ..vars] %>% na.omit() %>% 
+  GGally::ggpairs(
+    title = "Continuous covariates in logarithmic scale (grouped by tau)",
+    columnLabels = names,
+    columns = 1:7,
+    mapping = aes(colour = sports_type)) + 
+  theme_bw()
+```
+
+Defining the variables used by Ingenbleek-Lemaire for analysis.
+
+```{r new-vars}
+#| fig-width: 14
+#| fig-height: 14
+
+df[, ':='(
+  x1 = log(weight/ max_power),
+  x2 = log(max_power / cubic_capacity),
+  x3 = log(max_torque),
+  x4 = log(max_engine_speed),
+  x5 = log(cubic_capacity)
+) ]
+
+df[, .(x1, x2, x3, x4, x5, sports_type)] %>% na.omit() %>%
+  GGally::ggpairs(
+    title = "Ingenbleek-Lemaire variables (grouped by tau)",
+    columns = 1:5,
+    mapping = aes(colour = sports_type)) + 
+  theme_bw()
+```
+
+Only store the that we want to continue working with. Plot kernel density estimations and a normal distribution density estimation.
+
+```{r data-final}
+#| fig-width: 14
+#| fig-height: 9
+
+# All names not equal to x1, x2, ... x5
+vars <- df %>% names() %>% { .[ !( . %in% c("x1", "x2", "x3", "x4", "x5") ) ] }
+df[, (vars) := NULL] # delete uninteresting columns
+
+f <- function(x) {
+  ggplot() + geom_density(aes(x)) +
+    geom_function(
+      fun = dnorm, args = list(mean = mean(x), sd = sd(x)),
+      col = "red", linetype = "dashed") +
+  theme_bw()
+}
+
+p1 <- f(df[, x1]) + ggtitle("Density of 'x1'")
+p2 <- f(df[, x2]) + ggtitle("Density of 'x2'")
+p3 <- f(df[, x3]) + ggtitle("Density of 'x3'")
+p4 <- f(df[, x4]) + ggtitle("Density of 'x4'")
+p5 <- f(df[, x5]) + ggtitle("Density of 'x5'")
+
+gridExtra::grid.arrange(grobs = list(p1, p2, p3, p4, p5), ncol = 3)
+```
+
+## Principle Component Analysis (PCA)
+
+First normalize design matrix.
+
+```{r normalize}
+# Alternatively use '?base::scale'...
+f <- function(column) {
+  j <- column - mean(column)
+  j <- j / sd(j)
+  j
+}
+
+df <- apply(df, MARGIN = 2, f)
+
+apply(df, MARGIN = 2, function(j) mean(j)) # centered
+apply(df, MARGIN = 2, function(j) sd(j)) # scaled
+```
+
+PCA the of the (standardized design) matrix.
+
+```{r pca}
+#| fig-width: 14
+#| fig-height: 14
+
+X <- as.matrix(df)
+
+pca <- stats::princomp(X, cor = TRUE)
+pca$loadings
+summary(pca)
+
+pca$scores %>% 
+  as.data.frame() %>%
+  GGally::ggpairs(
+    diag = list(GGally::wrap("barDiag")),
+    upper = list(continuous = "density")) +
+  theme_bw()
+```
+
+Now let us recreated the grouped plot again using the principal components.
+
+```{r pca-group-plot}
+#| fig-width: 14
+#| fig-height: 14
+
+cbind(pca$scores, sports_type) %>%
+  GGally::ggpairs(
+    title = "Ingenbleek-Lemaire variables (grouped by tau)",
+    columns = 1:5,
+    mapping = aes(colour = as.factor(sports_type))) + 
+  theme_bw()
+```
+
+## Bottleneck Neural Network
+
+First install Keras API with Tensorflow as its back-end. The instructions are from [posit (click here)](https://keras3.posit.co/articles/getting_started.html)
+
+```{r keras-tensorflow}
+# Installs everything with the following (uncomment and execute (as administrator))...
+# reticulate::install_python(version = "3.11", force = TRUE)
+# keras3::install_keras(backend = "tensorflow", python_version = ">=3.9,<=3.11", gpu = FALSE)
+```
+
+Bottleneck neural network model.
+
+```{r bn-nn}
+bottleneck_with_three_layers <- function(q00, q11, q22) {
+
+  keras3::clear_session()
+  tensorflow::set_random_seed(4349)
+
+  input <- keras3::layer_input(
+    shape = c(q00), dtype = 'float32', name = 'Input')
+  
+  encoder <- input %>%
+    keras3::layer_dense(
+      units = q11, activation = 'tanh', use_bias = FALSE, name = 'Layer1') %>%
+    keras3::layer_dense(
+      units = q22, activation = 'tanh', use_bias = FALSE, name = 'Bottleneck')
+  
+  decoder <- encoder %>%
+    keras3::layer_dense(
+      units = q11, activation = 'tanh', use_bias = FALSE, name = 'Layer3') %>%
+    keras3::layer_dense(
+      units = q00, activation = 'linear', use_bias = FALSE, name = 'Output')
+  
+  model <- keras3::keras_model(
+    inputs = Input, outputs = Decoder)
+  
+  model %>% keras3::compile(
+    optimizer = optimizer_nadam(), loss = 'mean_squared_error')
+  
+  model
+}
+```
+
+Bottleneck neural network architecture.
+
+```{r bn-nn-params}
+q0 <- ncol(X); q1 <- 7; q2 <- 2
+```
+
+Fitting the model. Does not work on my machine... skip it...
+
+```{r bn-nn-fit}
+# bn_nn <- bottleneck_with_three_layers(q0, q1, q2)
+# summary(bn_nn)
+```
+
+# K-Means Clustering
+
+Employ clustering algorithm.
+
+```{r k-means}
+k_max <- 10
+k_avg <- colMeans(X)
+
+center <- list()
+
+twcd <- array(NA, c(k_max)) # total within-cluster dissimilarity
+classifier <- array(NA, c(k_max, nrow(X)))
+twcd[1] <- X^2 %>% as.matrix() %>% colSums() %>% sum()
+
+for(k in 2:k_max) {
+  if (k == 2)
+    k_res <- stats::kmeans(X, 2)
+  if (k > 2)
+    k_res <- stats::kmeans(X, k_center)
+  
+  twcd[k] <- k_res$withins %>% sum()
+  classifier[k, ] <- k_res$cluster
+  
+  center[[k]] <- k_res$centers
+  
+  k_center <- array(NA, c(k + 1, ncol(X)))
+  k_center[k + 1, ] <- k_avg
+  k_center[1:k, ] <- k_res$centers
+}
+
+```
+
+Use elbow method to determine the optimal clustering size of 4.
+
+```{r elbow-1}
+#| fig-width: 7
+#| fig-height: 7
+
+data <- as.data.frame(cbind(dissimilarity = twcd, k = base::seq_along(twcd)))
+
+ggplot(data = data, aes(x = k, y = dissimilarity)) + 
+  geom_point() + geom_line() + scale_x_continuous(breaks = 1:k_max) + 
+  geom_vline(aes(xintercept = 4), linetype = "dashed") +
+  theme_bw()
+```
+
+Look like most sports cars fall into cluster 2 (50 sports cars out of 59 total cars).
+
+```{r kmeans-summary}
+nr_cluster <- 4
+classifier[nr_cluster, ] %>% base::table() # number of points per cluster
+
+classifier[nr_cluster, ] %>%
+  as.factor() %>%
+  { cbind(df, sports_type, . ) } %>%
+  as.data.frame() %T>% 
+  { names(.) <- c("x1", "x2", "x3", "x4", "x5", "sports_type", "cluster") } %>%
+  dplyr::group_by(sports_type, cluster) %>%
+  dplyr::summarise(COUNT = dplyr::n()) # count number of groups
+
+center[[nr_cluster]] # cluster centers for cluster group 4
+```
+
+Skip the rest...
+
+
+
+
+
+
+
+
+

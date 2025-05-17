@@ -4,9 +4,12 @@
 .Ruserdata
 
 /.quarto/
-/001/001_cache/*
-/014/014_cache/*
+001/001_cache/
+014/014_cache/
+005/005_cache/
 
-001/.idea/*
-014/.idea/*
+001/.idea/
+014/.idea/
+005/.idea/
+
 .idea/*
