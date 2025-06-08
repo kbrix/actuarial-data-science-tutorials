@@ -1,53 +1,13 @@
 ﻿using System.Diagnostics;
-using Microsoft.ML;
-using Microsoft.ML.Tokenizers;
+using System.Text.Json;
+using Inference.Data;
 using Parquet.Serialization;
 using BertTokenizer = FastBertTokenizer.BertTokenizer;
 
 namespace Inference;
 
-using BERTTokenizers;
 using Microsoft.ML;
-using Microsoft.ML.Data;
-using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntime.Tensors;
 using System;
-
-public class ParquetRecord
-{
-    public long? level_0 { get; set; }
-    public long? index { get; set; }
-    public long? SCASEID { get; set; }
-    public string? SUMMARY_EN { get; set; }
-    public string? SUMMARY_GE { get; set; }
-    public long? INJSEVA { get; set; }
-    public long? NUMTOTV { get; set; }
-    public long? WEATHER1 { get; set; }
-    public long? WEATHER2 { get; set; }
-    public long? WEATHER3 { get; set; }
-    public long? WEATHER4 { get; set; }
-    public long? WEATHER5 { get; set; }
-    public long? WEATHER6 { get; set; }
-    public long? WEATHER7 { get; set; }
-    public long? WEATHER8 { get; set; }
-    public long? INJSEVB { get; set; }
-}
-
-public class DataPoint
-{
-    [VectorType(768)]
-    public float[] Features { get; set; }
-
-    public string Label { get; set; }
-}
-
-public class Prediction
-{
-    [ColumnName("PredictedLabel")]
-    public uint PredictedLabel { get; set; }
-
-    public float[] Score { get; set; }
-}
 
 class Program
 {
@@ -55,49 +15,41 @@ class Program
     {
         Console.WriteLine("Hello, World!");
 
-        // Load in data from parquet file
-        var parquetPath =
-            // @"C:\Users\brix\Documents\DataScience\clone\12 - NLP Using Transformers\NHTSA_NMVCCS_extract.parquet.gzip";
-            // @"/Users/brix/Documents/DataScience/clone/12 - NLP Using Transformers/NHTSA_NMVCCS_extract.parquet.gzip";
-            @"../../../../../NHTSA_NMVCCS_extract.parquet.gzip";
-
+        // Load in data from the parquet file
+        const string parquetPath = "../../../../../NHTSA_NMVCCS_extract.parquet.gzip";
+        
         var data = ParquetSerializer.DeserializeAsync<ParquetRecord>(parquetPath).Result.ToArray();
         Console.WriteLine($"Parquet data count: {data.Length}.");
-
-        // Create model
-        // var modelFile = @"C:\Users\brix\Downloads\distilbert-base-multilingual-cased.onnx";
-        var modelFile =
-            // @"C:\Users\brix\Downloads\distilbert-base-multilingual-cased-onnx\model.onnx"; // has output as the last hidden state
-            // @"/Users/brix/Documents/DataScience/012/distilbert-base-multilingual-cased-onnx/model.onnx"; // has output as the last hidden state
-            @"../../../../../distilbert-base-multilingual-cased-onnx/model.onnx"; // has output as the last hidden state
-
+        
+        // Create the transformer model
+        const string modelFile = "../../../../../distilbert-base-multilingual-cased-onnx/model.onnx"; // has output as the last hidden state
+        
         var context = new MLContext();
         var useGpu = false;
-
+        
         var estimator = context.Transforms.ApplyOnnxModel(
             modelFile: modelFile,
             inputColumnNames: ["input_ids", "attention_mask"], // Match the input names
             // outputColumnNames: ["logits"], // Match the model output names
             outputColumnNames: ["last_hidden_state"], // Match the model output names
             gpuDeviceId: useGpu ? 0 : null);
-
+        
         var transformer = estimator.Fit(context.Data.LoadFromEnumerable<BertInput>(new List<BertInput>()));
         var predictionEngine = context.Model.CreatePredictionEngine<BertInput, BertOutput>(transformer);
-
+        
         var tokenizer = new BertTokenizer();
-        // using var vocabularyFile = File.OpenText(@"C:\Users\brix\Downloads\distilbert-base-multilingual-cased-onnx\vocab.txt");
-        // using var vocabularyFile = File.OpenText(@"/Users/brix/Documents/DataScience/012/distilbert-base-multilingual-cased-onnx/vocab.txt");
         using var vocabularyFile = File.OpenText(@"../../../../../distilbert-base-multilingual-cased-onnx/vocab.txt");
         tokenizer.LoadVocabulary(vocabularyFile, convertInputToLowercase: false);
-
+        
         var limit = data.Length;
         var embeddings = new List<float[]>(limit);
+        
+        const string embeddingOutputFile = "../../../../../embeddings.csv";
+        const string parquetOutputFile = "../../../../../parquet.csv";
 
-        // var embeddingOutputFile = @"C:\Users\brix\Documents\DataScience\012\embeddings.csv";
-        // const string embeddingOutputFile = @"/Users/brix/Documents/DataScience/012/embeddings.csv";
-        const string embeddingOutputFile = @"../../../../../embeddings.csv";
-        // const string parquetOutputFile = @"/Users/brix/Documents/DataScience/012/parquet.csv";
-        const string parquetOutputFile = @"""../../../../../parquet.csv";
+        long timestamp;
+        TimeSpan elapsedTime;
+        
         if (File.Exists(embeddingOutputFile))
         {
             Console.WriteLine($"Reading embedding file: '{embeddingOutputFile}'.");
@@ -106,17 +58,18 @@ class Program
         }
         else
         {
-            var timestamp = Stopwatch.GetTimestamp();
+            timestamp = Stopwatch.GetTimestamp();
             for (var i = 0; i < limit; i++)
             {
                 var pct = 100.0 * (i / (limit - 1.0));
                 Console.WriteLine($"{TimeOnly.FromDateTime(DateTime.Now):HH:mm:ss:ffff} - {i:0000} - {pct}%");
                 var sentence = data[i].SUMMARY_EN!;
+                // Transform the sentence to a float array (an embedding)
                 var embedding = PredictionHelper.GenerateSentenceEmbedding(sentence, tokenizer, predictionEngine);
                 embeddings.Add(embedding);
             }
             
-            var elapsedTime = Stopwatch.GetElapsedTime(timestamp);
+            elapsedTime = Stopwatch.GetElapsedTime(timestamp);
             Console.WriteLine($"Completed {embeddings.Count} embedding in {elapsedTime:g}.");
             
             Console.WriteLine($"Saving embeddings file '{embeddingOutputFile}'.");
@@ -130,16 +83,15 @@ class Program
         var logisticRegressionContext = new MLContext(seed: 1337);
         
         var dataForLogisticRegression = data.Zip(embeddings, (record, embedding) =>
-            // new DataPoint { Label = record.NUMTOTV.ToString()!, Features = embedding }).ToList();
             new DataPoint { Label = Math.Min(3L, record.NUMTOTV ?? 0).ToString(), Features = embedding }).ToList();
         
         var dataViewForLogisticRegression = logisticRegressionContext.Data.LoadFromEnumerable(dataForLogisticRegression);
         
         var split = logisticRegressionContext.Data.TrainTestSplit(dataViewForLogisticRegression, testFraction: 0.2);
-        // var trainSet = logisticRegressionContext.Data
-        //     .CreateEnumerable<DataPoint>(split.TrainSet, reuseRowObject: false);
-        // var testSet = logisticRegressionContext.Data
-        //     .CreateEnumerable<DataPoint>(split.TestSet, reuseRowObject: false);
+        var trainSet = logisticRegressionContext.Data
+            .CreateEnumerable<DataPoint>(split.TrainSet, reuseRowObject: false);
+        var testSet = logisticRegressionContext.Data
+            .CreateEnumerable<DataPoint>(split.TestSet, reuseRowObject: false);
         
         var pipeline = logisticRegressionContext.Transforms.Conversion
             .MapValueToKey(nameof(DataPoint.Label))
@@ -150,17 +102,42 @@ class Program
         
         var model = pipeline.Fit(split.TrainSet);
         var transformedTestSet = model.Transform(split.TestSet);
-        // var predictions = logisticRegressionContext.Data
-        //     .CreateEnumerable<Prediction>(transformedTestSet, reuseRowObject: false).ToList();
-
+        
+        // Inspect the accuracy of the model
         var metrics = logisticRegressionContext.MulticlassClassification.Evaluate(transformedTestSet);
         Console.WriteLine();
-
-        Console.WriteLine($"Micro Accuracy: {metrics.MicroAccuracy:F2}");
+        
+        Console.WriteLine($"Micro Accuracy: {metrics.MicroAccuracy:F2}"); // 94 % -- decent enough...
         Console.WriteLine($"Macro Accuracy: {metrics.MacroAccuracy:F2}");
         Console.WriteLine($"Log Loss: {metrics.LogLoss:F2}");
         Console.WriteLine($"Log Loss Reduction: {metrics.LogLossReduction:F2}\n");
-
+        
         Console.WriteLine(metrics.ConfusionMatrix.GetFormattedConfusionTable());
+        
+        // Time for the large language model!
+        var counts = new int[data.Length];
+        var correctCounts = 0;
+        
+        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        
+        timestamp = Stopwatch.GetTimestamp();
+        for (int i = 0; i < data.Length; i++)
+        // for (int i = 0; i < 100; i++)
+        {
+            Console.WriteLine($"{TimeOnly.FromDateTime(DateTime.Now):HH:mm:ss:ffff} - {i:0000} / {data.Length - 1}");
+            
+            var sentence = data[i].SUMMARY_EN!;
+            counts[i] = LanguageModelHelper.ExtractVehicleCount(sentence, client);
+            
+            if (counts[i] == data[i].NUMTOTV)
+                correctCounts++;
+        }
+        elapsedTime = Stopwatch.GetElapsedTime(timestamp);
+        Console.WriteLine($"Completed task in {elapsedTime:g}.");
+        
+        var countOutputPath = "../../../../../counts.txt";
+        LanguageModelHelper.SaveVehicleCountsToDisk(countOutputPath, counts);
+        
+        Console.WriteLine($"Large language model accuracy {correctCounts}/{data.Length} ~ {correctCounts/data.Length:F2}");
     }
 }

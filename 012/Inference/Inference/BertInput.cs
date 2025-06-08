@@ -6,8 +6,8 @@ namespace Inference;
 public class BertInput
 {
     [ColumnName("input_ids")] // Matches 'input_ids' from the model input names
-    public long[] InputIds { get; set; }
+    public required long[] InputIds { get; set; }
     
     [ColumnName("attention_mask")] // Matches 'attention_mask' from the model input names
-    public long[] AttentionMask { get; set; }
+    public required long[] AttentionMask { get; set; }
 }

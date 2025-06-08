@@ -5,21 +5,16 @@ using Microsoft.ML;
 
 namespace Inference;
 
-public class PredictionHelper
+public static class PredictionHelper
 {
     public static float[] GenerateSentenceEmbedding(
-        // string sentence, BertBaseTokenizer tokenizer, PredictionEngine<BertInput, BertOutput> predictionEngine)
         string sentence, BertTokenizer tokenizer, PredictionEngine<BertInput, BertOutput> predictionEngine)
     {
-        // var encodedSentence = tokenizer.Encode(sentence.Length, sentence);
         var encodedSentence = tokenizer.Encode(sentence);
-        // var normalizedEncodedSentence = HelperMethods.Normalize(encodedSentence);
         var (inputIds, attentionMask, _) = HelperMethods.Normalize(encodedSentence);
 
         var input = new BertInput
         {
-            // InputIds = normalizedEncodedSentence.ToArray().Select(x => x.InputIds),
-            // AttentionMask = normalizedEncodedSentence.Select(x => x.AttentionMask).ToArray()
             InputIds = inputIds,
             AttentionMask = attentionMask
         };
