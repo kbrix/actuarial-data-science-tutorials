@@ -21,7 +21,15 @@ public record Message(
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum Model
 {
-    [JsonStringEnumMemberName("google/gemma-3-12b")] Gemma_3_12b
+    [JsonStringEnumMemberName("google/gemma-3-12b")] Gemma_3_12b,
+    [JsonStringEnumMemberName("google/gemma-3-27b")] Gemma_3_27b,
+    [JsonStringEnumMemberName("qwen/qwen3-1.7b")] Qwen_3_1_7b,
+    [JsonStringEnumMemberName("qwen/qwen3-4b")] Qwen_3_4b,
+    [JsonStringEnumMemberName("qwen/qwen3-32b")] Qwen_3_32b,
+    [JsonStringEnumMemberName("deepseek/deepseek-r1-0528-qwen3-8b")] DeepSeek_R1_Qwen3_8b,
+    [JsonStringEnumMemberName("microsoft/phi-4")] MS_Phi_4,
+    [JsonStringEnumMemberName("microsoft/phi-4-reasoning-plus")] MS_Phi_4_Reasoning_Plus,
+    [JsonStringEnumMemberName("ibm/granite-3.2-8b")] IBM_Granite_3_2_28,
 }
 
 // Request

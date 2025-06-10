@@ -115,29 +115,55 @@ class Program
         Console.WriteLine(metrics.ConfusionMatrix.GetFormattedConfusionTable());
         
         // Time for the large language model!
-        var counts = new int[data.Length];
-        var correctCounts = 0;
-        
-        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        
-        timestamp = Stopwatch.GetTimestamp();
-        for (int i = 0; i < data.Length; i++)
-        // for (int i = 0; i < 100; i++)
+        var indices = new SortedSet<int>();
+        var generator = new Random(Seed: 1337);
+        while (indices.Count < data.Length / 5) // ~20% of data
         {
-            Console.WriteLine($"{TimeOnly.FromDateTime(DateTime.Now):HH:mm:ss:ffff} - {i:0000} / {data.Length - 1}");
-            
-            var sentence = data[i].SUMMARY_EN!;
-            counts[i] = LanguageModelHelper.ExtractVehicleCount(sentence, client);
-            
-            if (counts[i] == data[i].NUMTOTV)
-                correctCounts++;
+            var index = generator.Next(0, data.Length);
+            indices.Add(index);
         }
-        elapsedTime = Stopwatch.GetElapsedTime(timestamp);
-        Console.WriteLine($"Completed task in {elapsedTime:g}.");
+
+        var subsetData = 
+            indices.Select(i => new { Row = i, Sentence = data[i].SUMMARY_EN!, Count = data[i].NUMTOTV! }).ToList();
+        var results = new List<LanguageModelResult>();
+
+        const Model languageModel = Model.Gemma_3_12b; // ~ 3 hours execution time for all data
+        // const Model languageModel = Model.Gemma_3_27b; // 1.5 hours on subset
+        // const Model languageModel = Model.IBM_Granite_3_2_28;
+        // const Model languageModel = Model.Qwen_3_1_7b; // 50 minutes on subset
+        // const Model languageModel = Model.Qwen_3_4b; 
+        // const Model languageModel = Model.Qwen_3_32b; 
+        // const Model languageModel = Model.DeepSeek_R1_Qwen3_8b; // poop
+        // const Model languageModel = Model.MS_Phi_4; // poop
+        // const Model languageModel = Model.MS_Phi_4_Reasoning_Plus; // poop
+
+        if (File.Exists(LanguageModelHelper.GetCountResultPath(languageModel)))
+        {
+            Console.WriteLine($"Reading language model file results from: '{LanguageModelHelper.GetCountResultPath(languageModel)}'.");
+            results = LanguageModelHelper.ReadVehicleCountsFromDisk(languageModel).ToList();
+        }
+        else
+        {
+            using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromMinutes(5);
         
-        var countOutputPath = "../../../../../counts.txt";
-        LanguageModelHelper.SaveVehicleCountsToDisk(countOutputPath, counts);
+            timestamp = Stopwatch.GetTimestamp();
+            results = subsetData.Select((x, index) =>
+                {
+                    var pct = 100.0 * (index / (subsetData.Count - 1.0));
+                    Console.WriteLine($"{TimeOnly.FromDateTime(DateTime.Now):HH:mm:ss:ffff} - {index:0000} / {subsetData.Count - 1} - {pct}%");
+                    var sentence = x.Sentence;
+                    var count = LanguageModelHelper.ExtractVehicleCount(sentence, languageModel, client);
+                    return new LanguageModelResult(RowNumber: x.Row, TrueCount: (int)x.Count!, PredictedCount: count);
+                })
+                .ToList();
         
-        Console.WriteLine($"Large language model accuracy {correctCounts}/{data.Length} ~ {correctCounts/data.Length:F2}");
+            elapsedTime = Stopwatch.GetElapsedTime(timestamp);
+            LanguageModelHelper.SaveVehicleCountsToDisk(results, languageModel);
+            Console.WriteLine($"Completed task in {elapsedTime:g}.");
+        }
+        
+        var correctCounts = (double)results.Count(x => x.TrueCount == x.PredictedCount);
+        Console.WriteLine($"Large language model accuracy {correctCounts}/{results.Count} (~ {correctCounts/results.Count:F2})");
     }
 }
