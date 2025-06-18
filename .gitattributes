@@ -2,3 +2,4 @@
 012/embeddings.csv filter=lfs diff=lfs merge=lfs -text
 012/distilbert-base-multilingual-cased-onnx/model.onnx filter=lfs diff=lfs merge=lfs -text
 012/distilbert-base-multilingual-cased-onnx/tokenizer.json filter=lfs diff=lfs merge=lfs -text
+012/distilbert-base-multilingual-cased-onnx-logits/model.onnx filter=lfs diff=lfs merge=lfs -text

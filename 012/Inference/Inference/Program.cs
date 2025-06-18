@@ -88,10 +88,10 @@ class Program
         var dataViewForLogisticRegression = logisticRegressionContext.Data.LoadFromEnumerable(dataForLogisticRegression);
         
         var split = logisticRegressionContext.Data.TrainTestSplit(dataViewForLogisticRegression, testFraction: 0.2);
-        var trainSet = logisticRegressionContext.Data
-            .CreateEnumerable<DataPoint>(split.TrainSet, reuseRowObject: false);
-        var testSet = logisticRegressionContext.Data
-            .CreateEnumerable<DataPoint>(split.TestSet, reuseRowObject: false);
+        // var trainSet = logisticRegressionContext.Data
+        //     .CreateEnumerable<DataPoint>(split.TrainSet, reuseRowObject: false);
+        // var testSet = logisticRegressionContext.Data
+        //     .CreateEnumerable<DataPoint>(split.TestSet, reuseRowObject: false);
         
         var pipeline = logisticRegressionContext.Transforms.Conversion
             .MapValueToKey(nameof(DataPoint.Label))
@@ -127,8 +127,8 @@ class Program
             indices.Select(i => new { Row = i, Sentence = data[i].SUMMARY_EN!, Count = data[i].NUMTOTV! }).ToList();
         var results = new List<LanguageModelResult>();
 
-        const Model languageModel = Model.Gemma_3_12b; // ~ 3 hours execution time for all data
-        // const Model languageModel = Model.Gemma_3_27b; // 1.5 hours on subset
+        // const Model languageModel = Model.Gemma_3_12b; // ~ 3 hours execution time for all data
+        const Model languageModel = Model.Gemma_3_27b; // 1.5 hours on subset
         // const Model languageModel = Model.IBM_Granite_3_2_28;
         // const Model languageModel = Model.Qwen_3_1_7b; // 50 minutes on subset
         // const Model languageModel = Model.Qwen_3_4b; 
